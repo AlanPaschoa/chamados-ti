@@ -35,7 +35,9 @@
             <td><span class="badge badge-<%= PRIORIDADES[t.prioridade].cor %>"><%= PRIORIDADES[t.prioridade].label %></span></td>
             <td><span class="status status-<%= STATUS[t.status].cor %>"><%= STATUS[t.status].label %></span></td>
             <td>
-              <% if (t.tecnico) { %>
+              <% if (t.tecnicoResponsavel) { %>
+                <span class="person"><%= t.tecnicoResponsavel %></span>
+              <% } else if (t.tecnico) { %>
                 <span class="person"><span class="avatar avatar-sm"><%= t.tecnico.iniciais %></span><%= t.tecnico.nome %></span>
               <% } else { %>
                 <span class="muted">Não atribuído</span>

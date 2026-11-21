@@ -8,19 +8,23 @@ const include = [
   { model: Technician, as: 'tecnico' },
 ];
 
+// Perfil "user" só enxerga os próprios chamados; tecnico e admin enxergam todos.
+const podeVer = (user, ticket) => user.perfil !== 'user' || ticket.autorUid === user.uid;
+
 // Normaliza os dados vindos do formulário
-function pickTicket(body) {
-  return {
+function pickTicket(body, user) {
+  const data = {
     titulo: (body.titulo || '').trim(),
     descricao: (body.descricao || '').trim(),
-    solicitante: (body.solicitante || '').trim(),
-    emailSolicitante: (body.emailSolicitante || '').trim() || null,
+    solicitante: (body.solicitante || '').trim() || user.nome,
+    emailSolicitante: (body.emailSolicitante || '').trim() || user.email || null,
     setor: body.setor || null,
     prioridade: body.prioridade || 'media',
-    status: body.status || 'aberto',
     categoryId: body.categoryId || null,
-    technicianId: body.technicianId || null,
   };
+  // Só técnico/admin podem escolher o responsável
+  if (user.perfil !== 'user') data.technicianId = body.technicianId || null;
+  return data;
 }
 
 async function formOptions() {
@@ -31,9 +35,13 @@ async function formOptions() {
   return { categorias, tecnicos };
 }
 
-async function findOr404(id, res, opts = {}) {
-  const ticket = await Ticket.findByPk(id, opts);
-  if (!ticket) res.status(404).render('404', { title: 'Chamado não encontrado' });
+// Busca o chamado e já barra quem não pode vê-lo (responde 404 para não revelar que existe).
+async function findOr404(req, res, opts = {}) {
+  const ticket = await Ticket.findByPk(req.params.id, opts);
+  if (!ticket || !podeVer(req.user, ticket)) {
+    res.status(404).render('404', { title: 'Chamado não encontrado' });
+    return null;
+  }
   return ticket;
 }
 
@@ -56,6 +64,9 @@ exports.index = async (req, res) => {
   if (tecnico === 'nenhum') where.technicianId = null;
   else if (tecnico) where.technicianId = tecnico;
 
+  // RBAC: usuário comum só lista os próprios chamados
+  if (req.user.perfil === 'user') where.autorUid = req.user.uid;
+
   const tickets = await Ticket.findAll({ where, include, order: [['createdAt', 'DESC']] });
   const opts = await formOptions();
 
@@ -71,7 +82,7 @@ exports.index = async (req, res) => {
 exports.new = async (req, res) => {
   res.render('tickets/form', {
     title: 'Novo chamado',
-    ticket: { prioridade: 'media', status: 'aberto' },
+    ticket: { prioridade: 'media', status: 'aberto', solicitante: req.user.nome, emailSolicitante: req.user.email },
     errors: [],
     isEdit: false,
     ...(await formOptions()),
@@ -80,14 +91,21 @@ exports.new = async (req, res) => {
 
 // POST /tickets
 exports.create = async (req, res) => {
-  const data = pickTicket(req.body);
+  const data = {
+    ...pickTicket(req.body, req.user),
+    status: 'aberto',
+    autorUid: req.user.uid,
+    autorNome: req.user.nome,
+    autorEmail: req.user.email,
+    tecnicoResponsavel: null,
+  };
   try {
     const ticket = await Ticket.create(data);
     await Comment.create({
       ticketId: ticket.id,
       autor: 'Sistema',
       tipo: 'sistema',
-      mensagem: `Chamado aberto por ${ticket.solicitante}.`,
+      mensagem: `Chamado aberto por ${ticket.autorNome}.`,
     });
     res.redirect(`/tickets/${ticket.id}?msg=${encodeURIComponent(`Chamado ${ticket.protocolo} criado com sucesso!`)}`);
   } catch (err) {
@@ -105,7 +123,7 @@ exports.create = async (req, res) => {
 
 // GET /tickets/:id
 exports.show = async (req, res) => {
-  const ticket = await findOr404(req.params.id, res, {
+  const ticket = await findOr404(req, res, {
     include: [...include, { model: Comment, as: 'comentarios' }],
     order: [[{ model: Comment, as: 'comentarios' }, 'createdAt', 'ASC']],
   });
@@ -114,9 +132,9 @@ exports.show = async (req, res) => {
   res.render('tickets/show', { title: ticket.protocolo, ticket, tecnicos, errors: [] });
 };
 
-// GET /tickets/:id/edit
+// GET /tickets/:id/edit (somente admin, garantido na rota)
 exports.edit = async (req, res) => {
-  const ticket = await findOr404(req.params.id, res);
+  const ticket = await findOr404(req, res);
   if (!ticket) return;
   res.render('tickets/form', {
     title: `Editar ${ticket.protocolo}`,
@@ -127,11 +145,12 @@ exports.edit = async (req, res) => {
   });
 };
 
-// PUT /tickets/:id
+// PUT /tickets/:id (somente admin)
 exports.update = async (req, res) => {
-  const ticket = await findOr404(req.params.id, res);
+  const ticket = await findOr404(req, res);
   if (!ticket) return;
-  const data = pickTicket(req.body);
+  const data = pickTicket(req.body, req.user);
+  data.status = STATUS[req.body.status] ? req.body.status : ticket.status;
   try {
     await ticket.update(data);
     res.redirect(`/tickets/${ticket.id}?msg=${encodeURIComponent('Chamado atualizado.')}`);
@@ -148,9 +167,32 @@ exports.update = async (req, res) => {
   }
 };
 
-// PATCH /tickets/:id/quick — atualização rápida (status, prioridade, técnico) com histórico
+// POST /tickets/:id/assume (tecnico ou admin) — assumir o chamado
+exports.assume = async (req, res) => {
+  const ticket = await findOr404(req, res);
+  if (!ticket) return;
+
+  if (ticket.tecnicoResponsavelUid === req.user.uid) {
+    return res.redirect(`/tickets/${ticket.id}?erro=${encodeURIComponent('Você já é o responsável por este chamado.')}`);
+  }
+
+  ticket.tecnicoResponsavel = req.user.nome;
+  ticket.tecnicoResponsavelUid = req.user.uid;
+  if (ticket.status === 'aberto') ticket.status = 'em_andamento';
+  await ticket.save();
+
+  await Comment.create({
+    ticketId: ticket.id,
+    autor: 'Sistema',
+    tipo: 'sistema',
+    mensagem: `Chamado assumido por ${req.user.nome}.`,
+  });
+  res.redirect(`/tickets/${ticket.id}?msg=${encodeURIComponent('Você assumiu o chamado.')}`);
+};
+
+// PATCH /tickets/:id/quick (tecnico ou admin) — status, prioridade, técnico, com histórico
 exports.quickUpdate = async (req, res) => {
-  const ticket = await findOr404(req.params.id, res, { include });
+  const ticket = await findOr404(req, res, { include });
   if (!ticket) return;
 
   const historico = [];
@@ -158,7 +200,7 @@ exports.quickUpdate = async (req, res) => {
   const technicianId = req.body.technicianId ? Number(req.body.technicianId) : null;
 
   if (status && STATUS[status] && status !== ticket.status) {
-    historico.push(`Status alterado de "${STATUS[ticket.status].label}" para "${STATUS[status].label}".`);
+    historico.push(`Status alterado de "${STATUS[ticket.status].label}" para "${STATUS[status].label}" por ${req.user.nome}.`);
     ticket.status = status;
   }
   if (prioridade && PRIORIDADES[prioridade] && prioridade !== ticket.prioridade) {
@@ -175,6 +217,12 @@ exports.quickUpdate = async (req, res) => {
     return res.redirect(`/tickets/${ticket.id}?erro=${encodeURIComponent('Nenhuma alteração realizada.')}`);
   }
 
+  // Quem atualiza um chamado sem responsável passa a ser o responsável
+  if (!ticket.tecnicoResponsavel) {
+    ticket.tecnicoResponsavel = req.user.nome;
+    ticket.tecnicoResponsavelUid = req.user.uid;
+  }
+
   await ticket.save();
   await Comment.bulkCreate(
     historico.map((mensagem) => ({ ticketId: ticket.id, autor: 'Sistema', tipo: 'sistema', mensagem }))
@@ -182,9 +230,9 @@ exports.quickUpdate = async (req, res) => {
   res.redirect(`/tickets/${ticket.id}?msg=${encodeURIComponent('Chamado atualizado.')}`);
 };
 
-// DELETE /tickets/:id
+// DELETE /tickets/:id (somente admin)
 exports.destroy = async (req, res) => {
-  const ticket = await findOr404(req.params.id, res);
+  const ticket = await findOr404(req, res);
   if (!ticket) return;
   const protocolo = ticket.protocolo;
   await ticket.destroy();

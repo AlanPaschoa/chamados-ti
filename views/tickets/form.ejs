@@ -34,15 +34,17 @@
           <% }) %>
         </select>
       </div>
-      <div class="field">
-        <label for="technicianId">Técnico responsável</label>
-        <select id="technicianId" name="technicianId">
-          <option value="">Não atribuído</option>
-          <% tecnicos.forEach(function (t) { %>
-            <option value="<%= t.id %>" <%= String(ticket.technicianId) === String(t.id) ? 'selected' : '' %>><%= t.nome %></option>
-          <% }) %>
-        </select>
-      </div>
+      <% if (user.perfil === 'tecnico' || user.perfil === 'admin') { %>
+        <div class="field">
+          <label for="technicianId">Técnico responsável</label>
+          <select id="technicianId" name="technicianId">
+            <option value="">Não atribuído</option>
+            <% tecnicos.forEach(function (t) { %>
+              <option value="<%= t.id %>" <%= String(ticket.technicianId) === String(t.id) ? 'selected' : '' %>><%= t.nome %></option>
+            <% }) %>
+          </select>
+        </div>
+      <% } %>
     </div>
 
     <fieldset class="field">
